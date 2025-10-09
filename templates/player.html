@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Tune into English</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+  <script>const SPOTIFY_ACCESS_TOKEN = "{{ access_token }}";</script>
+  <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+  <script src="https://sdk.scdn.co/spotify-player.js" defer></script>
+</head>
+
+  <!-- ========================= ヘッダー ========================= -->
+  <header id="sticky-header">
+    <div class="app-title">Tune into English</div>
+
+    <!-- 検索フォーム（JS導入前でも見た目を保つ） -->
+    <div class="search-form" id="header-search">
+      <input type="text" id="search-input" placeholder="曲名 または  曲名 / アーティスト名" />
+      <button id="search-button" type="button">検索</button>
+    </div>
+
+    <div class="user-actions">
+      {% if not access_token_present %}
+        <p class="login-status"><a href="/login">ログイン</a></p>
+      {% else %}
+        <p class="login-status logged-in">ログイン済み: <a href="/logout">ログアウト</a></p>
+      {% endif %}
+      <a href="/mypage" class="mypage-link">マイページ</a>
+    </div>
+  </header>
+
+  <!-- ========================= メイン ========================= -->
+  <div class="container">
+
+    <div class="search-results" id="search-results"></div>
+
+    <div class="main-content-area">
+
+      <!-- 左: メインプレイヤー -->
+      <div class="left-panel" id="leftPanel">
+        <div class="left-panel-content">
+
+          <!-- ジャケット -->
+          <div class="album-art-container" id="album-art-container">
+            <img
+              id="album-art"
+              src="https://placehold.co/220x220/121212/ffffff?text=No+Album+Art"
+              alt="アルバムアート"
+            />
+          </div>
+
+          <!-- 曲情報 -->
+          <div id="current-track-info">
+            <div class="marquee-wrapper" id="song-title-wrapper">
+              <div class="marquee-text" id="current-song-title">曲名</div>
+            </div>
+            <div class="marquee-wrapper" id="artist-name-wrapper">
+              <div class="marquee-text" id="current-artist-name">アーティスト名</div>
+            </div>
+          </div>
+
+          <!-- 再生コントロール -->
+          <div class="player-controls-container">
+            <button id="prevTrackButton" class="control-button" aria-label="前の曲">
+              <img src="/static/images/prev.png" alt="前へ" />
+            </button>
+            <button id="togglePlayButton" class="play-button" aria-label="再生/一時停止">
+              <img id="mainPlayPauseIcon" src="/static/images/play.png" alt="再生" />
+            </button>
+            <button id="nextTrackButton" class="control-button" aria-label="次の曲">
+              <img src="/static/images/next.png" alt="次へ" />
+            </button>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- 右: 歌詞表示 -->
+        <div class="right-panel">
+    <div id="lyrics-section">
+      <div id="lyrics-content"></div>
+    </div>
+  </div>
+
+    </div><!-- /.main-content-area -->
+
+    <!-- ========================= フッター ========================= -->
+    <footer id="global-player-footer">
+
+      <!-- 左: ジャケット＋曲情報 -->
+      <div class="footer-section footer-left">
+        <button class="toggle-panel-button" id="toggleLeftPanelButton" aria-label="左パネルの表示切替">
+          <svg fill="currentColor" height="24" viewBox="0 0 24 24" width="24" aria-hidden="true">
+            <path d="M14.06 5.94L8 12l6.06 6.06 1.06-1.06L10.18 12l4.94-4.94-1.06-1.06z"></path>
+          </svg>
+        </button>
+        <div class="track-info-footer">
+          <img
+            id="footerAlbumArt"
+            src="https://placehold.co/60x60/282828/ffffff?text=Art"
+            alt="フッターのアルバムアート"
+          />
+          <div class="text-info">
+            <div class="marquee-wrapper-footer" id="footer-song-title-wrapper">
+              <div class="marquee-text" id="footerSongTitle">曲名</div>
+            </div>
+            <div class="marquee-wrapper-footer" id="footer-artist-name-wrapper">
+              <div class="marquee-text" id="footerArtistName">アーティスト名</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 中央: 再生コントロール＋シーク -->
+      <div class="footer-section footer-center">
+        <div class="footer-controls">
+          <button id="footerPrevTrackButton" class="control-button" aria-label="前の曲">
+            <img src="/static/images/prev.png" alt="前へ" />
+          </button>
+          <button id="footerTogglePlayButton" class="play-button" aria-label="再生/一時停止">
+            <img id="footerPlayPauseIcon" src="/static/images/play.png" alt="再生" />
+          </button>
+          <button id="footerNextTrackButton" class="control-button" aria-label="次の曲">
+            <img src="/static/images/next.png" alt="次へ" />
+          </button>
+        </div>
+
+        <!-- シークバー -->
+        <div class="seekbar-container">
+          <span id="currentTime">0:00</span>
+          <input type="range" id="seekBar" min="0" max="100" value="0" />
+          <span id="totalTime">0:00</span>
+        </div>
+      </div>
+
+      <!-- 右: 音量 -->
+      <div class="footer-section footer-right">
+        <input type="range" id="volumeSlider" min="0" max="100" value="50" />
+      </div>
+
+    </footer>
+
+  </div><!-- /.container -->
+
+</body>
+</html>

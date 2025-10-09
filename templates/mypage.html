@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>mypage</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+
+</head>
+<body>
+  <div class="profile-header">
+  {% if user.images %}
+    <img src="{{ user.images[0].url }}" alt="プロフィール画像" class="profile-icon" />
+  {% endif %}
+  <div class="profile-name">
+    <h2>{{ user.display_name }}</h2>
+  </div>
+</div>
+    <div class="mypage-container">
+  <h1>{{ user.display_name }} さんのマイページ</h1>
+
+  <div class="profile-info">
+    <p><strong>ユーザーID:</strong> {{ user.id }}</p>
+    <p><strong>メールアドレス:</strong> {{ user.email }}</p>
+    <p><strong>Spotify URI:</strong>
+      <a href="{{ user.external_urls.spotify }}" target="_blank">{{ user.external_urls.spotify }}</a>
+    </p>
+    {% if user.images %}
+      <img src="{{ user.images[0].url }}" alt="プロフィール画像" />
+    {% endif %}
+  </div>
+</div>
+
+</body>
+</html>
