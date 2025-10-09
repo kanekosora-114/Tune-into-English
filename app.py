@@ -1,4 +1,4 @@
-# app.py
+# app.py（Render本番用フル版）
 import os
 import time
 import logging
@@ -22,14 +22,22 @@ dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
 
 app = Flask(__name__)
-# ★ 固定の secret_key を使う（.env で設定可能）
+
+# ★ 固定の secret_key（Renderの環境変数で設定する）
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-only-secret")
-app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7  # 7日間
+
+# ★ スマホのOAuth戻りでセッションが落ちないようCookie設定
+app.config.update(
+    PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 7,  # 7日間
+    SESSION_COOKIE_NAME="tune_session",
+    SESSION_COOKIE_SECURE=True,      # 本番はTrue（HTTPSのみ）
+    SESSION_COOKIE_SAMESITE="Lax",   # うまくいかない場合は "None" に変更（Secure必須）
+)
 
 # ログ設定
 logging.basicConfig(
     filename='error.log',
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s %(levelname)s:%(message)s'
 )
 app.logger.addHandler(logging.StreamHandler())
@@ -56,11 +64,9 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 # ---------------------------------------
 def make_spotify_client(token: str) -> spotipy.Spotify:
     """
-    タイムアウト & リトライ設定済みの Spotipy クライアントを作る
-    - 接続:10秒 / 読み取り:20秒
-    - 429/5xx を指数バックオフで最大3回リトライ
+    タイムアウト & リトライ設定済みの Spotipy クライアント
     """
-    session: Session = requests.Session()
+    session_s: Session = requests.Session()
     retry = Retry(
         total=3,
         connect=3,
@@ -71,12 +77,12 @@ def make_spotify_client(token: str) -> spotipy.Spotify:
         raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
+    session_s.mount("https://", adapter)
+    session_s.mount("http://", adapter)
 
     return spotipy.Spotify(
         auth=token,
-        requests_session=session,
+        requests_session=session_s,
         requests_timeout=(10, 20)  # (connect, read)
     )
 
@@ -89,8 +95,7 @@ def ensure_token():
     refresh_token = session.get("refresh_token")
     expires_at    = int(session.get("expires_at", 0))
 
-    # 60秒の余裕を見て「もうすぐ切れる」も更新対象にする
-    SKEW = 60
+    SKEW = 60  # 60秒前倒し
     now = int(time.time())
 
     if not access_token:
@@ -107,10 +112,10 @@ def ensure_token():
                 scope=SCOPE
             )
             token_info = sp_oauth.refresh_access_token(refresh_token)
-            # expires_at が無い実装差へのフォールバック
             new_expires_at = token_info.get("expires_at")
             if not new_expires_at and "expires_in" in token_info:
                 new_expires_at = now + int(token_info["expires_in"])
+
             session["access_token"]  = token_info["access_token"]
             session["expires_at"]    = new_expires_at or (now + 3000)
             session["refresh_token"] = token_info.get("refresh_token", refresh_token)
@@ -124,7 +129,6 @@ def ensure_token():
 # ---------------------------------------
 # ルーティング
 # ---------------------------------------
-
 @app.route('/')
 def index():
     token = ensure_token()
@@ -176,10 +180,10 @@ def callback():
         scope=SCOPE
     )
     try:
-        # ★ DeprecationWarning回避：返り値は使わずキャッシュ化だけ
+        # ★ まずキャッシュに保存させる（返り値は使わない）
         sp_oauth.get_access_token(code, as_dict=False)
 
-        # ★ 常に dict で取得
+        # ★ 確実に dict を取得
         token_info = sp_oauth.get_cached_token()
         if not token_info or 'access_token' not in token_info:
             app.logger.error(f"get_cached_token が空 or 不正: {token_info}")
@@ -192,10 +196,11 @@ def callback():
 
         session.permanent = True
         session['access_token']  = token_info['access_token']
-        session['refresh_token'] = token_info.get('refresh_token')  # 取れたかログで確認推奨
+        session['refresh_token'] = token_info.get('refresh_token')
         session['expires_at']    = expires_at or (now + 3000)
 
-        return redirect(url_for('player'))
+        # ★ スマホ対策：絶対URLで /player へ
+        return redirect(f"{request.host_url.rstrip('/')}/player")
     except Exception as e:
         app.logger.error(f"アクセストークンの取得に失敗: {e}", exc_info=True)
         session.clear()
@@ -462,4 +467,5 @@ def api_translate_lines():
 # ---------------------------------------
 if __name__ == '__main__':
     os.makedirs('templates', exist_ok=True)
-    app.run(debug=True)
+    # 本番は gunicorn が起動するが、ローカル起動もできるようにしておく
+    app.run(host="0.0.0.0", port=5000)
