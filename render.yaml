@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: tune-into-english
+    env: python
+    rootDir: .
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn app:app"
