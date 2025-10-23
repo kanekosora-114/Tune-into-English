@@ -500,3 +500,143 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   applyTranslateVisibility();
 });
+/* ===================== 🔍 Spotify全体検索（追記） ===================== */
+(() => {
+  const $ = (sel) => document.querySelector(sel);
+  const input   = $('#search-input');
+  const btn     = $('#search-button');
+  const results = $('#search-results');
+  const status  = $('#search-status');
+
+  if (!input || !btn || !results || !status) return; // 要素が無いページでは何もしない
+
+  let lastQuery = "";
+  let nextOffset = null;
+  let loading = false;
+  let debounceId = null;
+
+  function msToMSS(ms){
+    const s = Math.floor((ms||0)/1000);
+    const m = Math.floor(s/60);
+    const ss = String(s%60).padStart(2,'0');
+    return `${m}:${ss}`;
+  }
+
+  function render(items, append=false){
+    if(!append) results.innerHTML = "";
+    for(const t of (items||[])){
+      const card = document.createElement('div');
+      card.className = 'sr-card';
+      card.innerHTML = `
+        <img class="sr-art" src="${t.image||''}" alt="">
+        <div class="sr-meta">
+          <div class="sr-name"   title="${t.name||''}">${t.name||''}</div>
+          <div class="sr-artist" title="${t.artists||''}">${t.artists||''}</div>
+          <div class="sr-micro">${t.album||''} ・ ${msToMSS(t.duration_ms)}</div>
+          <div class="sr-btns">
+            <button class="btn-solid" data-uri="${t.uri}">再生</button>
+            <button class="btn-ghost" data-uri="${t.uri}">キュー追加</button>
+          </div>
+        </div>
+      `;
+      results.appendChild(card);
+    }
+  }
+
+  async function search(q, offset=0, append=false){
+    if(loading) return;
+    loading = true;
+    status.textContent = '検索中…';
+    try{
+      const url = `/api/search_tracks?q=${encodeURIComponent(q)}&limit=12&offset=${offset}`;
+      const r = await fetch(url);
+      const data = await r.json();
+      if(data.error){
+        status.textContent = 'エラー: ' + data.error;
+        return;
+      }
+      render(data.items || [], append);
+      if((data.items||[]).length===0 && !append){
+        status.textContent = '該当なし';
+      }else{
+        status.textContent = (append ? '追加表示' : '検索完了');
+      }
+      nextOffset = data.next_offset ?? null;
+    }catch(e){
+      status.textContent = '通信エラー';
+    }finally{
+      loading = false;
+    }
+  }
+
+  function doSearch(){
+    const q = (input.value || '').trim();
+    if(!q){
+      status.textContent = 'キーワードを入力してください。';
+      results.innerHTML = '';
+      nextOffset = null;
+      return;
+    }
+    lastQuery = q;
+    search(q, 0, false);
+  }
+
+  // 入力のデバウンス
+  input.addEventListener('input', () => {
+    clearTimeout(debounceId);
+    debounceId = setTimeout(doSearch, 350);
+  });
+  input.addEventListener('keydown', (e) => {
+    if(e.key === 'Enter') doSearch();
+  });
+  btn.addEventListener('click', doSearch);
+
+  // 無限スクロール（任意）
+  window.addEventListener('scroll', ()=>{
+    if(nextOffset==null || loading) return;
+    const nearBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 200;
+    if(nearBottom){
+      search(lastQuery, nextOffset, true);
+    }
+  });
+
+  // 再生／キュー追加
+  results.addEventListener('click', async (e)=>{
+    const el = e.target;
+    if(!(el.tagName === 'BUTTON' && el.dataset.uri)) return;
+    const uri = el.dataset.uri;
+
+    // 再生
+    if(el.classList.contains('btn-solid')){
+      if(!window.currentDeviceId){
+        alert('再生デバイスが未接続です。プレイヤーを起動してからお試しください。');
+        return;
+      }
+      try{
+        const r = await fetch('/play_track', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ track_uri: uri, device_id: window.currentDeviceId })
+        });
+        const data = await r.json();
+        if(data.error) alert('再生エラー: ' + data.error);
+      }catch(err){
+        alert('通信エラー（再生）');
+      }
+      return;
+    }
+
+    // キュー追加
+    try{
+      const r = await fetch('/api/queue_track', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ uri })
+      });
+      const data = await r.json();
+      if(data.error) alert('追加エラー: ' + data.error);
+    }catch(err){
+      alert('通信エラー（キュー追加）');
+    }
+  });
+})();
