@@ -50,6 +50,9 @@ const $content = document.getElementById('lyrics-content');
 const translateToggle = document.getElementById('translateToggle');
 let translateEnabled = null;
 
+// 起動ボタン（モバイルの音声制限対策）
+const startBtn = document.getElementById('start-player');
+
 /* ===================== 定数 / ユーティリティ ===================== */
 const PLACE_MAIN = "https://placehold.co/220x220/121212/ffffff?text=No+Album+Art";
 const PLACE_FOOT = "https://placehold.co/60x60/282828/ffffff?text=Art";
@@ -71,28 +74,30 @@ async function safeFetchJson(url, init) {
   } catch { return null; }
 }
 
+/* ============ アクセストークン（テンプレ埋め込み or API） ============ */
+async function getAccessToken() {
+  if (typeof SPOTIFY_ACCESS_TOKEN === "string" && SPOTIFY_ACCESS_TOKEN.length > 10) {
+    return SPOTIFY_ACCESS_TOKEN;
+  }
+  const j = await safeFetchJson("/get_access_token");
+  if (j && j.access_token) return j.access_token;
+  throw new Error("access token missing");
+}
+
 /* ===================== モデル→UI描画 ===================== */
 function setPlayIcons(isPlaying) {
   const playPNG  = "/static/images/play.png";
-  const pausePNG = "/static/images/pause.png"; // ← ちゃんと pause にする！
+  const pausePNG = "/static/images/pause.png"; // pause.png が必須（置いてね）
 
   const icon = isPlaying ? pausePNG : playPNG;
   const alt  = isPlaying ? "一時停止" : "再生";
 
   if (mainPlayPauseIcon) {
-    if (mainPlayPauseIcon.src !== location.origin + icon && !mainPlayPauseIcon.src.endsWith(icon)) {
-      mainPlayPauseIcon.src = icon;
-    } else {
-      mainPlayPauseIcon.src = icon; // キャッシュ対策で明示代入
-    }
+    mainPlayPauseIcon.src = icon;
     mainPlayPauseIcon.alt = alt;
   }
   if (footerPlayPauseIcon) {
-    if (footerPlayPauseIcon.src !== location.origin + icon && !footerPlayPauseIcon.src.endsWith(icon)) {
-      footerPlayPauseIcon.src = icon;
-    } else {
-      footerPlayPauseIcon.src = icon;
-    }
+    footerPlayPauseIcon.src = icon;
     footerPlayPauseIcon.alt = alt;
   }
 }
@@ -109,7 +114,7 @@ function renderProgressFromModel() {
 
   let prog = baseProgressMs;
   if (isPlaying) {
-    const dt = Date.now() - baseTimestampMs; // 経過ミリ秒
+    const dt = Date.now() - baseTimestampMs;
     prog = Math.min(durationMs, Math.max(0, baseProgressMs + dt));
   }
 
@@ -120,7 +125,6 @@ function renderProgressFromModel() {
   if (currentTimeLabel) currentTimeLabel.textContent = toMMSS(prog);
   if (totalTimeLabel)   totalTimeLabel.textContent   = toMMSS(durationMs);
 
-  // 歌詞ハイライトも補間進捗で更新
   highlightByTime(prog / 1000);
 }
 
@@ -185,7 +189,7 @@ function stopTicker() {
   rafId = null;
 }
 
-/* ===================== 歌詞（既存のロジックを維持） ===================== */
+/* ===================== 歌詞 ===================== */
 let parsedLyrics = [];   // [{ t:秒, text:行 }]
 let currentLyricIndex = -1;
 let lastTrackId = null;
@@ -354,13 +358,12 @@ function bindControls() {
   const clickWrap = (fn) => async () => {
     if (!player) return;
     try { await fn(); } catch {}
-    // 操作直後にSDK state → APIの順で同期
     const state = await player.getCurrentState().catch(()=>null);
     if (state) setModelFromSDK(state);
     reconcileFromApi();
   };
-
   const bind = (el, fn) => { if (el) el.addEventListener('click', fn); };
+
   bind(togglePlayButton,       clickWrap(()=>player.togglePlay()));
   bind(footerTogglePlayButton, clickWrap(()=>player.togglePlay()));
   bind(prevTrackButton,        clickWrap(()=>player.previousTrack()));
@@ -381,7 +384,6 @@ function bindControls() {
       const pct = Number(e.target.value) / 100;
       const pos = Math.floor(pct * nowPlaying.durationMs);
       try { await player.seek(pos); } catch {}
-      // モデル即時更新（API待たず滑らか）
       nowPlaying.baseProgressMs  = pos;
       nowPlaying.baseTimestampMs = Date.now();
       renderProgressFromModel();
@@ -396,8 +398,8 @@ function bindControls() {
 }
 
 /* ===================== Web Playback SDK 初期化 ===================== */
-window.onSpotifyWebPlaybackSDKReady = () => {
-  const token = SPOTIFY_ACCESS_TOKEN; // Flask から埋め込み
+async function initPlayer() {
+  const token = await getAccessToken();
 
   player = new Spotify.Player({
     name: 'Tune into English Player',
@@ -406,42 +408,76 @@ window.onSpotifyWebPlaybackSDKReady = () => {
   });
 
   player.addListener('ready', async ({ device_id }) => {
+    console.log('READY device_id=', device_id);
     currentDeviceId = device_id;
     try {
-      await fetch('/transfer_playback', {
+      const r = await fetch('/transfer_playback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ device_id })
       });
+      console.log('transfer_playback status=', r.status);
     } catch (e) { console.warn('transfer_playback failed', e); }
 
-    // 初回同期：APIでメタ取得 → 歌詞 → ティッカー開始
     await reconcileFromApi();
     await loadLyricsOnce();
     startTicker();
   });
 
   player.addListener('not_ready', ({ device_id }) => {
+    console.warn('NOT_READY', device_id);
     if (currentDeviceId === device_id) currentDeviceId = null;
   });
 
-  player.addListener('initialization_error', ({ message }) => console.error('init error:', message));
-  player.addListener('authentication_error', ({ message }) => console.error('auth error:', message));
-  player.addListener('account_error', ({ message }) => console.error('account error:', message));
-
-  // 状態変化ごとに即時反映＋整合
-  player.addListener('player_state_changed', (state) => {
-    currentPlaybackState = state || null;
-    setModelFromSDK(state);   // 進捗は即時
-    reconcileFromApi();       // メタ情報はAPIで整合
+  player.addListener('initialization_error', (e) => console.error('init error:', e));
+  player.addListener('authentication_error', (e) => {
+    console.error('auth error:', e);
+    alert('Spotify認証エラー。ログインし直してください。');
+    // location.href = '/logout';
+  });
+  player.addListener('account_error', (e) => {
+    console.error('account error:', e);
+    alert('Spotify Premium アカウントが必要です。');
   });
 
-  player.connect();
-  bindControls();
+  player.addListener('player_state_changed', (state) => {
+    currentPlaybackState = state || null;
+    setModelFromSDK(state);
+    reconcileFromApi();
+  });
 
-  // 整合の定期実行（外部操作に追従）
+  const ok = await player.connect();
+  console.log('player.connect() =', ok);
+  if (!ok) alert('プレイヤーに接続できません。Spotifyの「Allowed Origins」にこのサイトの https URL を追加してください。');
+
+  if (player.activateElement) {
+    try { await player.activateElement(); } catch {}
+  }
+
+  bindControls();
   setInterval(reconcileFromApi, 8000);
   setInterval(pollTrackChange, 8000);
+}
+
+// SDKロード後に起動ボタンで初期化（モバイル対策）
+window.onSpotifyWebPlaybackSDKReady = () => {
+  if (startBtn) {
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled = true;
+      startBtn.textContent = '起動中…';
+      try {
+        await initPlayer();
+        startBtn.textContent = '起動完了！Spotifyのデバイス一覧を確認';
+      } catch (e) {
+        console.error(e);
+        startBtn.textContent = '起動失敗…もう一度';
+        startBtn.disabled = false;
+      }
+    });
+  } else {
+    // ボタンが無い場合は自動起動（PC向け）
+    initPlayer();
+  }
 };
 
 /* ===================== 初期起動（翻訳UIセット） ===================== */
