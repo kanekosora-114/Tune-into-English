@@ -250,6 +250,15 @@ def transfer_playback():
         app.logger.error(f"デバイス切り替え失敗: {e}", exc_info=True)
         return {'error': 'デバイス切り替えに失敗しました'}, 500
 
+@app.route("/search")
+def search_page():
+    token = ensure_token()
+    if not token:
+        return redirect(url_for("index"))
+    # 初期クエリ（?q=...）をテンプレに渡す
+    q = (request.args.get("q") or "").strip()
+    return render_template("search.html", initial_query=q, access_token_present=True)
+
 @app.route("/logout", methods=["POST", "GET"])
 def logout():
     """

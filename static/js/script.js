@@ -640,3 +640,103 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 })();
+/* ===================== 🔍 検索ページ専用（/search） ===================== */
+(() => {
+  if (document.body.dataset.page !== 'search') return;
+
+  const $ = (s) => document.querySelector(s);
+  const input   = $('#search-input');
+  const results = $('#search-results');
+  const status  = $('#search-status');
+
+  let lastQuery = (window.__INITIAL_QUERY__ || '').trim();
+  let nextOffset = null;
+  let loading = false;
+
+  function msToMSS(ms){
+    const s = Math.floor((ms||0)/1000);
+    const m = Math.floor(s/60);
+    const ss = String(s%60).padStart(2,'0');
+    return `${m}:${ss}`;
+  }
+
+  function render(items, append=false){
+    if(!append) results.innerHTML = "";
+    for(const t of (items||[])){
+      const card = document.createElement('div');
+      card.className = 'sr-card';
+      card.innerHTML = `
+        <img class="sr-art" src="${t.image||''}" alt="">
+        <div class="sr-meta">
+          <div class="sr-name"   title="${t.name||''}">${t.name||''}</div>
+          <div class="sr-artist" title="${t.artists||''}">${t.artists||''}</div>
+          <div class="sr-micro">${t.album||''} ・ ${msToMSS(t.duration_ms)}</div>
+          <div class="sr-btns">
+            <button class="btn-solid" data-uri="${t.uri}">再生</button>
+            <button class="btn-ghost" data-uri="${t.uri}">キュー追加</button>
+          </div>
+        </div>
+      `;
+      results.appendChild(card);
+    }
+  }
+
+  async function search(q, offset=0, append=false){
+    if(loading) return;
+    loading = true;
+    status.textContent = '検索中…';
+    try{
+      const r = await fetch(`/api/search_tracks?q=${encodeURIComponent(q)}&limit=12&offset=${offset}`);
+      const data = await r.json();
+      if(data.error){ status.textContent = 'エラー: ' + data.error; return; }
+      render(data.items || [], append);
+      status.textContent = (data.items?.length || 0) ? (append ? '追加表示' : '検索完了') : '該当なし';
+      nextOffset = data.next_offset ?? null;
+    }catch(e){
+      status.textContent = '通信エラー';
+    }finally{
+      loading = false;
+    }
+  }
+
+  // 無限スクロール（任意）
+  window.addEventListener('scroll', ()=>{
+    if(nextOffset==null || loading) return;
+    const nearBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 200;
+    if(nearBottom){ search(lastQuery, nextOffset, true); }
+  });
+
+  // 再生／キュー
+  results.addEventListener('click', async (e)=>{
+    const el = e.target;
+    if(!(el.tagName === 'BUTTON' && el.dataset.uri)) return;
+    const uri = el.dataset.uri;
+
+    if(el.classList.contains('btn-solid')){
+      if(!window.currentDeviceId){
+        alert('再生デバイスが未接続です。プレイヤーを起動してからお試しください。');
+        return;
+      }
+      const r = await fetch('/play_track', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ track_uri: uri, device_id: window.currentDeviceId })
+      });
+      const data = await r.json();
+      if(data.error) alert('再生エラー: ' + data.error);
+      return;
+    }
+    // キュー追加
+    const r = await fetch('/api/queue_track', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ uri })
+    });
+    const data = await r.json();
+    if(data.error) alert('追加エラー: ' + data.error);
+  });
+
+  // 初期クエリがあれば自動検索
+  if (lastQuery) {
+    input.value = lastQuery;
+    search(lastQuery, 0, false);
+  }
+})();

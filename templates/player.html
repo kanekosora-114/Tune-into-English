@@ -19,11 +19,11 @@
   <header id="sticky-header">
     <div class="app-title">Tune into English</div>
 
-    <!-- 検索フォーム -->
-    <div class="search-form" id="header-search">
-      <input type="text" id="search-input" placeholder="曲名 または  曲名 / アーティスト名" />
-      <button id="search-button" type="button">検索</button>
-    </div>
+<!-- 置き換え：ヘッダー内の検索フォーム -->
+<form class="search-form" id="header-search" action="/search" method="GET">
+  <input type="text" id="search-input" name="q" placeholder="曲名 または  曲名 / アーティスト名" />
+  <button id="search-button" type="submit">検索</button>
+</form>
 
     <div class="user-actions">
       {% if not access_token_present %}
