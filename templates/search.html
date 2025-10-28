@@ -5,18 +5,17 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>曲を検索 | Tune into English</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
-  <script>
-    // 初期クエリ（?q=）をJSへ橋渡し
-    window.__INITIAL_QUERY__ = {{ initial_query|tojson }};
-  </script>
+  <script>window.__INITIAL_QUERY__={{ initial_query|tojson|safe }};</script>
   <script src="{{ url_for('static', filename='js/script.js') }}" defer></script>
+  <script src="https://sdk.scdn.co/spotify-player.js" defer></script>
+
 </head>
 <body data-page="search">
 
   <header id="sticky-header">
     <div class="app-title">🔍 曲を検索</div>
 
-    <!-- player と同じフォーム（GETで /search に遷移） -->
+    <!-- playerと同じUI（GETで /search に遷移） -->
     <form class="search-form" id="header-search" action="/search" method="GET">
       <input id="search-input" name="q" type="text" placeholder="曲名・アーティストで検索…" />
       <button id="search-button" type="submit">検索</button>

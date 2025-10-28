@@ -1,52 +1,69 @@
-# app.py（Render本番用フル版・発行元アカ以外OK・置き換え可）
+# app.py（ローカルHTTP/本番HTTPS 切替対応・完全版）
 import os
 import time
 import logging
-from flask import Flask, redirect, request, session, url_for, render_template, make_response, jsonify
+from typing import Optional
+
+from flask import (
+    Flask, redirect, request, session, url_for,
+    render_template, jsonify
+)
 from dotenv import load_dotenv
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from spotipy.cache_handler import CacheHandler
-from lyrics_service import get_lyrics_by_title_artist
 
-# タイムアウト・リトライ用
+# タイムアウト・リトライ
 import requests
 from requests import Session
 from requests.exceptions import ReadTimeout, ConnectionError
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# ← 追加：login用のURL解析
+# URL解析（ログ用）
 from urllib.parse import urlparse, parse_qs
 
-# ---------------------------------------
+# ==============================
 # 設定・初期化
-# ---------------------------------------
+# ==============================
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
+
+APP_ENV = os.getenv("APP_ENV", "development")
+IS_PROD = APP_ENV == "production"
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-only-secret")
 
-# セッションCookie（本番はSecure/HTTPS）
-app.config.update(
-    PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 7,  # 7日
-    SESSION_COOKIE_NAME="tune_session",
-    SESSION_COOKIE_SECURE=True,
-    SESSION_COOKIE_SAMESITE="None",  # うまくいかない時は "None"（要 HTTPS）
-)
+# Cookie切替（ここが肝）
+if IS_PROD:
+    app.config.update(
+        PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 7,  # 7日
+        SESSION_COOKIE_NAME="tune_session",
+        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_SAMESITE="None",   # 本番はHTTPS前提
+    )
+else:
+    app.config.update(
+        PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 7,
+        SESSION_COOKIE_NAME="tune_session",
+        SESSION_COOKIE_SECURE=False,      # ローカルHTTP
+        SESSION_COOKIE_SAMESITE="Lax",
+    )
 
 # ログ
 logging.basicConfig(
     filename='error.log',
     level=logging.INFO,
-    format='%(asctime)s %(levelname)s:%(message)s'
+    format='[%(asctime)s] %(levelname)s: %(message)s'
 )
 app.logger.addHandler(logging.StreamHandler())
+app.logger.setLevel(logging.INFO)
 
+# Spotify/OAuth 設定
 CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("SPOTIPY_REDIRECT_URI")
+REDIRECT_URI = os.getenv("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:5000/callback")
 SCOPE = (
     "user-read-playback-state "
     "user-modify-playback-state "
@@ -54,22 +71,19 @@ SCOPE = (
     "streaming user-read-email user-read-private"
 )
 
-# ← ここに確認用ログ（デプロイ後に必ず削除してOK）
-app.logger.setLevel(logging.INFO)
-app.logger.info(f"CLIENT_ID={os.getenv('SPOTIPY_CLIENT_ID')}")
-app.logger.info(f"REDIRECT_URI={os.getenv('SPOTIPY_REDIRECT_URI')}")
+app.logger.info(f"[ENV] APP_ENV={APP_ENV}")
+app.logger.info(f"[OAuth] REDIRECT_URI={REDIRECT_URI}")
 
-# ---------------------------------------
+# ==============================
 # OpenAI（行ごと翻訳）
-# ---------------------------------------
+# ==============================
 from openai import OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-# ---------------------------------------
-# Spotipy: セッションキャッシュ（ユーザー毎）
-#   → ファイルキャッシュを使わず session["token_info"] に保存
-# ---------------------------------------
+# ==============================
+# Spotipy: セッションキャッシュ（Flask session保存）
+# ==============================
 class FlaskSessionCache(CacheHandler):
     def get_cached_token(self):
         return session.get("token_info")
@@ -78,18 +92,23 @@ class FlaskSessionCache(CacheHandler):
         return True
 
 def get_sp_oauth(show_dialog: bool = True) -> SpotifyOAuth:
+    # ローカルHTTPならOAuthlibのHTTPS強制を一時解除
+    if REDIRECT_URI.startswith("http://"):
+        os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+
     return SpotifyOAuth(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
-        redirect_uri=REDIRECT_URI,
+        redirect_uri=REDIRECT_URI,     # ダッシュボードと完全一致必須
         scope=SCOPE,
         cache_handler=FlaskSessionCache(),
-        show_dialog=show_dialog,  # ← 毎回アカウント選択を出す
+        show_dialog=show_dialog,
+        requests_timeout=15,
     )
 
-# ---------------------------------------
+# ==============================
 # Spotipy セッション（タイムアウト & リトライ）
-# ---------------------------------------
+# ==============================
 def make_spotify_client(token: str) -> spotipy.Spotify:
     session_s: Session = requests.Session()
     retry = Retry(
@@ -104,18 +123,18 @@ def make_spotify_client(token: str) -> spotipy.Spotify:
     session_s.mount("http://", adapter)
     return spotipy.Spotify(auth=token, requests_session=session_s, requests_timeout=(10, 20))
 
-# ---------------------------------------
+# ==============================
 # トークン有効化ユーティリティ
-# ---------------------------------------
-_SKEW = 60  # 秒（早めに更新）
+# ==============================
+_SKEW = 60  # 秒（早め更新）
 
-def _token_valid(token_info: dict | None) -> bool:
+def _token_valid(token_info: Optional[dict]) -> bool:
     if not token_info or "access_token" not in token_info:
         return False
     exp = int(token_info.get("expires_at", 0))
     return exp - _SKEW > int(time.time())
 
-def ensure_token() -> str | None:
+def ensure_token() -> Optional[str]:
     """有効なアクセストークンを返す。必要ならリフレッシュ。"""
     token_info = session.get("token_info")
     if _token_valid(token_info):
@@ -123,12 +142,10 @@ def ensure_token() -> str | None:
 
     if token_info and token_info.get("refresh_token"):
         try:
-            sp_oauth = get_sp_oauth(show_dialog=False)  # リフレ時はダイアログ不要
+            sp_oauth = get_sp_oauth(show_dialog=False)
             new_info = sp_oauth.refresh_access_token(token_info["refresh_token"])
-            # expires_at が無い場合は expires_in から計算
             now = int(time.time())
             new_info["expires_at"] = new_info.get("expires_at") or (now + int(new_info.get("expires_in", 3600)))
-            # refresh_token が返らない場合は前の値を保持
             if "refresh_token" not in new_info:
                 new_info["refresh_token"] = token_info["refresh_token"]
             session["token_info"] = new_info
@@ -139,18 +156,18 @@ def ensure_token() -> str | None:
             return None
     return None
 
-# ---------------------------------------
-# 戻るボタンで保護ページが残らないように
-# ---------------------------------------
+# ==============================
+# キャッシュ系ヘッダ
+# ==============================
 @app.after_request
 def add_no_store_headers(resp):
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     return resp
 
-# ---------------------------------------
+# ==============================
 # ルーティング
-# ---------------------------------------
+# ==============================
 @app.route('/')
 def index():
     token = ensure_token()
@@ -174,12 +191,10 @@ def mypage():
     user_profile = sp.current_user()
     return render_template('mypage.html', user=user_profile, access_token_present=True)
 
-@app.route("/login")
+@app.route('/login')
 def login():
-    # ★ 修正：未定義だった sp_oauth を生成
     sp_oauth = get_sp_oauth(show_dialog=True)
     auth_url = sp_oauth.get_authorize_url()
-    # 送出しているredirect_uriをログで可視化
     q = parse_qs(urlparse(auth_url).query)
     app.logger.info(f"[AUTH_URL] {auth_url}")
     app.logger.info(f"[AUTH_URL] redirect_uri={q.get('redirect_uri',[None])[0]}")
@@ -194,28 +209,31 @@ def callback():
 
     sp_oauth = get_sp_oauth(show_dialog=False)
     try:
-        # 認可コードからトークン取得（セッションキャッシュに保存される）
         sp_oauth.get_access_token(code, as_dict=False)
         token_info = sp_oauth.get_cached_token()
         if not token_info or 'access_token' not in token_info:
-            app.logger.error(f"get_cached_token が空 or 不正: {token_info}")
+            app.logger.error(f"get_cached_token 空/不正: {token_info}")
             return "認証に失敗しました（トークン取得に失敗）。", 500
 
-        # expires_at が無い場合の補完
         now = int(time.time())
-        exp = token_info.get('expires_at')
-        if not exp and "expires_in" in token_info:
+        if not token_info.get('expires_at') and "expires_in" in token_info:
             token_info['expires_at'] = now + int(token_info["expires_in"])
 
         session.permanent = True
         session["token_info"] = token_info
 
-        # スマホ対策：絶対URLで /player
-        return redirect(f"{request.host_url.rstrip('/')}/player")
+        return redirect(url_for('player'))
     except Exception as e:
-        app.logger.error(f"アクセストークンの取得に失敗: {e}", exc_info=True)
+        app.logger.error(f"アクセストークン取得失敗: {e}", exc_info=True)
         session.clear()
         return "認証に失敗しました。", 500
+
+@app.route('/get_access_token')
+def get_access_token_for_frontend():
+    token = ensure_token()
+    if token:
+        return {'access_token': token}
+    return {'error': '認証情報が見つかりません'}, 401
 
 @app.route('/transfer_playback', methods=['POST'])
 def transfer_playback():
@@ -234,7 +252,6 @@ def transfer_playback():
         return {'message': '再生デバイスを切り替えました'}, 200
     except spotipy.SpotifyException as e:
         if getattr(e, "http_status", None) == 401:
-            # 一度だけリフレッシュして再試行
             session["token_info"] = None
             retry = ensure_token()
             if retry:
@@ -243,88 +260,55 @@ def transfer_playback():
                     sp.transfer_playback(device_id=device_id, force_play=False)
                     return {'message': '再生デバイスを切り替えました(リトライ)'}, 200
                 except Exception as ee:
-                    app.logger.error(f"デバイス切り替えリトライ失敗: {ee}", exc_info=True)
-        app.logger.error(f"デバイス切り替え失敗: {e}", exc_info=True)
+                    app.logger.error(f"デバイス切替リトライ失敗: {ee}", exc_info=True)
+        app.logger.error(f"デバイス切替失敗: {e}", exc_info=True)
         return {'error': 'デバイス切り替えに失敗しました'}, 500
     except Exception as e:
-        app.logger.error(f"デバイス切り替え失敗: {e}", exc_info=True)
+        app.logger.error(f"デバイス切替失敗: {e}", exc_info=True)
         return {'error': 'デバイス切り替えに失敗しました'}, 500
-
-@app.route("/search")
-def search_page():
-    token = ensure_token()
-    if not token:
-        return redirect(url_for("index"))
-    # 初期クエリ（?q=...）をテンプレに渡す
-    q = (request.args.get("q") or "").strip()
-    return render_template("search.html", initial_query=q, access_token_present=True)
-
-@app.route("/logout", methods=["POST", "GET"])
-def logout():
-    """
-    セッション/キャッシュを完全破棄。
-    Spotify側アカウントもログアウトして、別アカウントで入り直せるようにする。
-    """
-    # Spotipyの（もし使っていれば）ファイルキャッシュ削除用キー
-    try:
-        cache_path = session.pop("SPOTIFY_CACHE_PATH", None)
-        if cache_path and os.path.exists(cache_path):
-            os.remove(cache_path)
-    except Exception as e:
-        app.logger.warning(f"Failed to remove cache file: {e}")
-
-    # セッション破棄
-    try:
-        session.pop("token_info", None)
-        session.clear()
-    except Exception as e:
-        app.logger.warning(f"Session clear failed: {e}")
-
-    # Spotify公式のログアウトページへ（ブラウザのSpotifyセッションも切る）
-    return redirect("https://accounts.spotify.com/logout")
-
-@app.route('/get_access_token')
-def get_access_token_for_frontend():
-    token = ensure_token()
-    if token:
-        return {'access_token': token}
-    return {'error': '認証情報が見つかりません'}, 401
 
 @app.route('/play_track', methods=['POST'])
 def play_track():
     token = ensure_token()
     if not token:
-        return {'error': '未認証またはトークン期限切れ'}, 401
+        return jsonify({'error': '未認証またはトークン期限切れ'}), 401
 
-    data = request.get_json(silent=True) or {}
-    track_uri = data.get('track_uri')
-    device_id = data.get('device_id')
-    if not track_uri or not device_id:
-        return {'error': 'track_uriとdevice_idが必要です'}, 400
+    d = request.get_json(silent=True) or {}
+    track_uri = d.get('track_uri')
+    preferred_device = d.get('device_id')  # 省略可
+    if not track_uri:
+        return jsonify({'error': 'track_uri が必要です'}), 400
+
+    sp = make_spotify_client(token)
+
+    def pick_device():
+        """優先: 引数→active→先頭"""
+        if preferred_device:
+            return preferred_device
+        devs = sp.devices().get("devices", [])
+        if not devs:
+            return None
+        active = next((x for x in devs if x.get("is_active")), None)
+        return (active or devs[0]).get("id")
 
     try:
-        sp = make_spotify_client(token)
+        device_id = pick_device()
+        if not device_id:
+            return jsonify({'error': 'NO_ACTIVE_DEVICE',
+                            'hint': 'Spotifyアプリを起動するか /player を開いてデバイス接続してください。'}), 409
+
+        # 再生を奪わずに転送してから再生
+        sp.transfer_playback(device_id=device_id, force_play=False)
+        time.sleep(0.3)
         sp.start_playback(device_id=device_id, uris=[track_uri])
-        return {'message': '再生開始'}, 200
+        return jsonify({'ok': True, 'device_id': device_id})
     except spotipy.SpotifyException as e:
-        if getattr(e, "http_status", None) == 401:
-            session["token_info"] = None
-            retry = ensure_token()
-            if retry:
-                try:
-                    sp = make_spotify_client(retry)
-                    sp.start_playback(device_id=device_id, uris=[track_uri])
-                    return {'message': '再生開始(リトライ)'}, 200
-                except Exception as ee:
-                    app.logger.error(f"再生リトライ失敗: {ee}", exc_info=True)
-        app.logger.error(f"Spotify APIエラー: {e}", exc_info=True)
-        return {'error': f'Spotify APIエラー: {getattr(e, "msg", str(e))}'}, 500
-    except (ReadTimeout, ConnectionError) as e:
-        app.logger.warning(f"start_playback timeout/network: {e}")
-        return {'error': '一時的なネットワーク問題（後で再試行）'}, 503
+        app.logger.exception("play_track failed")
+        return jsonify({'error': getattr(e, "msg", str(e))}), 500
     except Exception as e:
-        app.logger.error(f"再生失敗: {e}", exc_info=True)
-        return {'error': '予期せぬエラーが発生しました'}, 500
+        app.logger.exception("play_track failed (generic)")
+        return jsonify({'error': str(e)}), 500
+
 
 @app.get("/api/current-track")
 def api_current_track():
@@ -357,6 +341,9 @@ def api_current_track():
         app.logger.error(f"現在再生取得エラー: {e}", exc_info=True)
         return {"ok": False, "error": str(e)}, 500
 
+# 歌詞取得（例：lrclib）
+from lyrics_service import get_lyrics_by_title_artist
+
 @app.get("/api/lyrics")
 def api_lyrics():
     token = ensure_token()
@@ -384,10 +371,6 @@ def api_lyrics():
     except Exception as e:
         app.logger.error(f"歌詞取得エラー: {e}", exc_info=True)
         return {"ok": False, "error": str(e)}, 500
-
-@app.route("/health")
-def health():
-    return "ok", 200
 
 @app.get("/api/currently_playing")
 def api_currently_playing():
@@ -442,9 +425,6 @@ def api_currently_playing():
         "timestamp_ms": int(time.time() * 1000)
     }, 200
 
-# ---------------------------------------
-# 行ごと翻訳 API
-# ---------------------------------------
 @app.post("/api/translate_lines")
 def api_translate_lines():
     try:
@@ -491,15 +471,8 @@ def api_translate_lines():
         app.logger.error(f"/api/translate_lines error: {e}", exc_info=True)
         return {"ok": False, "error": str(e)}, 500
 
-# =======================================
-# 🔍 追加：Spotify 全体検索 API & キュー追加 API
-# =======================================
 @app.get("/api/search_tracks")
 def api_search_tracks():
-    """
-    /api/search_tracks?q=keyword&limit=12&offset=0
-    Spotify 全体からトラック検索
-    """
     token = ensure_token()
     if not token:
         return jsonify({"items": [], "next_offset": None, "note": "unauthorized"}), 401
@@ -507,13 +480,11 @@ def api_search_tracks():
     q = (request.args.get("q") or "").strip()
     limit = request.args.get("limit", default=12, type=int)
     offset = request.args.get("offset", default=0, type=int)
-
     if not q:
         return jsonify({"items": [], "next_offset": None})
 
     try:
         sp = make_spotify_client(token)
-        # できればユーザー国でヒットさせる
         try:
             me = sp.current_user()
             market = me.get("country") or None
@@ -526,9 +497,7 @@ def api_search_tracks():
         for t in tracks.get("items", []):
             artists = ", ".join([a["name"] for a in t.get("artists", [])])
             album = t.get("album", {})
-            img = ""
-            if album.get("images"):
-                img = album["images"][-1]["url"]  # 小さめ
+            img = album["images"][-1]["url"] if album.get("images") else ""
             items.append({
                 "id": t.get("id"),
                 "name": t.get("name"),
@@ -548,30 +517,57 @@ def api_search_tracks():
 
 @app.post("/api/queue_track")
 def api_queue_track():
-    """
-    JSON: { "uri": "spotify:track:..." }
-    現在のアクティブデバイスにキュー追加
-    """
     token = ensure_token()
     if not token:
         return jsonify({"error": "unauthorized"}), 401
 
     data = request.get_json(silent=True) or {}
     uri = data.get("uri")
+    preferred_device = data.get("device_id")
     if not uri:
         return jsonify({"error": "uri required"}), 400
 
+    sp = make_spotify_client(token)
+
     try:
-        sp = make_spotify_client(token)
         sp.add_to_queue(uri)
         return jsonify({"ok": True})
+    except spotipy.SpotifyException as e:
+        if getattr(e, "http_status", None) == 404:
+            try:
+                device_id = preferred_device
+                if not device_id:
+                    devs = sp.devices().get("devices", [])
+                    if devs:
+                        active = next((d for d in devs if d.get("is_active")), None)
+                        device_id = (active or devs[0]).get("id")
+                if not device_id:
+                    return jsonify({
+                        "error": "NO_ACTIVE_DEVICE",
+                        "hint": "Spotifyアプリを起動するか、プレイヤーページを開いてデバイス接続してください。"
+                    }), 409
+
+                sp.transfer_playback(device_id=device_id, force_play=False)
+                time.sleep(0.4)
+                sp.add_to_queue(uri)
+                return jsonify({"ok": True, "activated_device": device_id})
+            except Exception as ee:
+                app.logger.exception("queue retry after transfer failed")
+                return jsonify({"error": "queue_failed_after_transfer", "detail": str(ee)}), 500
+        app.logger.exception("queue error")
+        return jsonify({"error": getattr(e, "msg", str(e))}), 500
     except Exception as e:
         app.logger.exception("queue error")
         return jsonify({"error": str(e)}), 500
 
-# ---------------------------------------
+@app.route("/health")
+def health():
+    return "ok", 200
+
+# ==============================
 # エントリーポイント
-# ---------------------------------------
+# ==============================
 if __name__ == '__main__':
     os.makedirs('templates', exist_ok=True)
-    app.run(host="0.0.0.0", port=5000)
+    host = "0.0.0.0" if IS_PROD else "127.0.0.1"
+    app.run(host=host, port=5000, debug=not IS_PROD)

@@ -65,6 +65,12 @@ const toMMSS = (ms) => {
   return `${m}:${ss}`;
 };
 
+function getDeviceIdHint() {
+  try {
+    return window.currentDeviceId || currentDeviceId || localStorage.getItem('wds_device_id') || null;
+  } catch { return window.currentDeviceId || currentDeviceId || null; }
+}
+
 async function safeFetchJson(url, init) {
   try {
     const res = await fetch(url, { cache: "no-store", ...(init || {}) });
@@ -87,7 +93,7 @@ async function getAccessToken() {
 /* ===================== モデル→UI描画 ===================== */
 function setPlayIcons(isPlaying) {
   const playPNG  = "/static/images/play.png";
-  const pausePNG = "/static/images/pause.png"; // pause.png が必須（置いてね）
+  const pausePNG = "/static/images/pause.png"; // pause.png が必須
 
   const icon = isPlaying ? pausePNG : playPNG;
   const alt  = isPlaying ? "一時停止" : "再生";
@@ -174,21 +180,6 @@ async function reconcileFromApi() {
   setModelFromApi(d);
 }
 
-/* ===================== rAF ティッカー ===================== */
-let rafId = null;
-function startTicker() {
-  if (rafId) return;
-  const tick = () => {
-    rafId = requestAnimationFrame(tick);
-    renderProgressFromModel();
-  };
-  rafId = requestAnimationFrame(tick);
-}
-function stopTicker() {
-  if (rafId) cancelAnimationFrame(rafId);
-  rafId = null;
-}
-
 /* ===================== 歌詞 ===================== */
 let parsedLyrics = [];   // [{ t:秒, text:行 }]
 let currentLyricIndex = -1;
@@ -265,10 +256,10 @@ function applyTranslateVisibility() {
 }
 
 async function fetchCurrentTrack() {
-  return (await safeFetchJson('/api/current-track')) || { ok: false };
+  return (await safeFetchJson('/api/current-track')) || { ok: False };
 }
 async function fetchTimedLyrics() {
-  return await safeFetchJson('/api/lyrics_timed'); // サーバ側にある場合のみ
+  return await safeFetchJson('/api/lyrics_timed'); // サーバ側にある場合のみ（無くてもOK）
 }
 async function fetchPlainLyrics() {
   const j = await safeFetchJson('/api/lyrics');
@@ -407,9 +398,13 @@ async function initPlayer() {
     volume: 0.5
   });
 
+  // ready は1つでOK（両方の変数＋LSに保存）
   player.addListener('ready', async ({ device_id }) => {
     console.log('READY device_id=', device_id);
     currentDeviceId = device_id;
+    window.currentDeviceId = device_id;
+    try { localStorage.setItem('wds_device_id', device_id); } catch {}
+
     try {
       const r = await fetch('/transfer_playback', {
         method: 'POST',
@@ -424,16 +419,10 @@ async function initPlayer() {
     startTicker();
   });
 
-  player.addListener('not_ready', ({ device_id }) => {
-    console.warn('NOT_READY', device_id);
-    if (currentDeviceId === device_id) currentDeviceId = null;
-  });
-
   player.addListener('initialization_error', (e) => console.error('init error:', e));
   player.addListener('authentication_error', (e) => {
     console.error('auth error:', e);
     alert('Spotify認証エラー。ログインし直してください。');
-    // location.href = '/logout';
   });
   player.addListener('account_error', (e) => {
     console.error('account error:', e);
@@ -457,6 +446,21 @@ async function initPlayer() {
   bindControls();
   setInterval(reconcileFromApi, 8000);
   setInterval(pollTrackChange, 8000);
+}
+
+/* ===================== rAF ティッカー ===================== */
+let rafId = null;
+function startTicker() {
+  if (rafId) return;
+  const tick = () => {
+    rafId = requestAnimationFrame(tick);
+    renderProgressFromModel();
+  };
+  rafId = requestAnimationFrame(tick);
+}
+function stopTicker() {
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = null;
 }
 
 // SDKロード後に起動ボタンで初期化（モバイル対策）
@@ -500,7 +504,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   applyTranslateVisibility();
 });
-/* ===================== 🔍 Spotify全体検索（追記） ===================== */
+
+/* ===================== 🔍 Spotify全体検索（player画面のヘッダー） ===================== */
 (() => {
   const $ = (sel) => document.querySelector(sel);
   const input   = $('#search-input');
@@ -508,138 +513,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const results = $('#search-results');
   const status  = $('#search-status');
 
-  if (!input || !btn || !results || !status) return; // 要素が無いページでは何もしない
+  // player画面には search-results は無い想定なので何もしない
+  if (!input || !btn || !status || results) return;
 
-  let lastQuery = "";
-  let nextOffset = null;
-  let loading = false;
-  let debounceId = null;
-
-  function msToMSS(ms){
-    const s = Math.floor((ms||0)/1000);
-    const m = Math.floor(s/60);
-    const ss = String(s%60).padStart(2,'0');
-    return `${m}:${ss}`;
-  }
-
-  function render(items, append=false){
-    if(!append) results.innerHTML = "";
-    for(const t of (items||[])){
-      const card = document.createElement('div');
-      card.className = 'sr-card';
-      card.innerHTML = `
-        <img class="sr-art" src="${t.image||''}" alt="">
-        <div class="sr-meta">
-          <div class="sr-name"   title="${t.name||''}">${t.name||''}</div>
-          <div class="sr-artist" title="${t.artists||''}">${t.artists||''}</div>
-          <div class="sr-micro">${t.album||''} ・ ${msToMSS(t.duration_ms)}</div>
-          <div class="sr-btns">
-            <button class="btn-solid" data-uri="${t.uri}">再生</button>
-            <button class="btn-ghost" data-uri="${t.uri}">キュー追加</button>
-          </div>
-        </div>
-      `;
-      results.appendChild(card);
-    }
-  }
-
-  async function search(q, offset=0, append=false){
-    if(loading) return;
-    loading = true;
-    status.textContent = '検索中…';
-    try{
-      const url = `/api/search_tracks?q=${encodeURIComponent(q)}&limit=12&offset=${offset}`;
-      const r = await fetch(url);
-      const data = await r.json();
-      if(data.error){
-        status.textContent = 'エラー: ' + data.error;
-        return;
-      }
-      render(data.items || [], append);
-      if((data.items||[]).length===0 && !append){
-        status.textContent = '該当なし';
-      }else{
-        status.textContent = (append ? '追加表示' : '検索完了');
-      }
-      nextOffset = data.next_offset ?? null;
-    }catch(e){
-      status.textContent = '通信エラー';
-    }finally{
-      loading = false;
-    }
-  }
-
-  function doSearch(){
-    const q = (input.value || '').trim();
-    if(!q){
-      status.textContent = 'キーワードを入力してください。';
-      results.innerHTML = '';
-      nextOffset = null;
-      return;
-    }
-    lastQuery = q;
-    search(q, 0, false);
-  }
-
-  // 入力のデバウンス
-  input.addEventListener('input', () => {
-    clearTimeout(debounceId);
-    debounceId = setTimeout(doSearch, 350);
-  });
-  input.addEventListener('keydown', (e) => {
-    if(e.key === 'Enter') doSearch();
-  });
-  btn.addEventListener('click', doSearch);
-
-  // 無限スクロール（任意）
-  window.addEventListener('scroll', ()=>{
-    if(nextOffset==null || loading) return;
-    const nearBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 200;
-    if(nearBottom){
-      search(lastQuery, nextOffset, true);
-    }
-  });
-
-  // 再生／キュー追加
-  results.addEventListener('click', async (e)=>{
-    const el = e.target;
-    if(!(el.tagName === 'BUTTON' && el.dataset.uri)) return;
-    const uri = el.dataset.uri;
-
-    // 再生
-    if(el.classList.contains('btn-solid')){
-      if(!window.currentDeviceId){
-        alert('再生デバイスが未接続です。プレイヤーを起動してからお試しください。');
-        return;
-      }
-      try{
-        const r = await fetch('/play_track', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ track_uri: uri, device_id: window.currentDeviceId })
-        });
-        const data = await r.json();
-        if(data.error) alert('再生エラー: ' + data.error);
-      }catch(err){
-        alert('通信エラー（再生）');
-      }
-      return;
-    }
-
-    // キュー追加
-    try{
-      const r = await fetch('/api/queue_track', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ uri })
-      });
-      const data = await r.json();
-      if(data.error) alert('追加エラー: ' + data.error);
-    }catch(err){
-      alert('通信エラー（キュー追加）');
-    }
-  });
+  // このIIFEは「フォーム送信 → /search」に任せるため、ロジック無し
 })();
+
 /* ===================== 🔍 検索ページ専用（/search） ===================== */
 (() => {
   if (document.body.dataset.page !== 'search') return;
@@ -712,23 +591,30 @@ document.addEventListener('DOMContentLoaded', () => {
     if(!(el.tagName === 'BUTTON' && el.dataset.uri)) return;
     const uri = el.dataset.uri;
 
+    // 再生
     if(el.classList.contains('btn-solid')){
-      if(!window.currentDeviceId){
+      const deviceId = getDeviceIdHint();
+      if(!deviceId){
         alert('再生デバイスが未接続です。プレイヤーを起動してからお試しください。');
         return;
       }
       const r = await fetch('/play_track', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ track_uri: uri, device_id: window.currentDeviceId })
+        body: JSON.stringify({ track_uri: uri, device_id: deviceId })
       });
       const data = await r.json();
       if(data.error) alert('再生エラー: ' + data.error);
       return;
     }
     // キュー追加
+    const deviceIdHint = getDeviceIdHint();
+    if (!deviceIdHint) {
+      alert('デバイスが未接続です。プレイヤーを開くかSpotifyアプリを起動してから再試行してください。');
+      return;
+    }
     const r = await fetch('/api/queue_track', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ uri })
+      body: JSON.stringify({ uri, device_id: deviceIdHint })
     });
     const data = await r.json();
     if(data.error) alert('追加エラー: ' + data.error);
